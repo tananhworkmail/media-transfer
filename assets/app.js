@@ -17,10 +17,32 @@
         dropZone: document.getElementById('dropZone'),
         uploadQueue: document.getElementById('uploadQueue'),
         uploadGroup: document.getElementById('uploadGroup'),
+        openUploadBtn: document.getElementById('openUploadBtn'),
+        uploadModal: document.getElementById('uploadModal'),
+        moveModal: document.getElementById('moveModal'),
+        moveSummary: document.getElementById('moveSummary'),
+        moveTarget: document.getElementById('moveTarget'),
+        confirmMoveBtn: document.getElementById('confirmMoveBtn'),
         gallery: document.getElementById('gallery'),
+        listTools: document.getElementById('listTools'),
+        selectPageBtn: document.getElementById('selectPageBtn'),
+        pageRange: document.getElementById('pageRange'),
+        sortSelect: document.getElementById('sortSelect'),
+        selectionToolbar: document.getElementById('selectionToolbar'),
+        selectionCount: document.getElementById('selectionCount'),
+        batchStatus: document.getElementById('batchStatus'),
+        downloadSelectedBtn: document.getElementById('downloadSelectedBtn'),
+        moveSelectedBtn: document.getElementById('moveSelectedBtn'),
+        deleteSelectedBtn: document.getElementById('deleteSelectedBtn'),
+        clearSelectionBtn: document.getElementById('clearSelectionBtn'),
+        pagination: document.getElementById('pagination'),
+        previousPageBtn: document.getElementById('previousPageBtn'),
+        nextPageBtn: document.getElementById('nextPageBtn'),
+        pageInfo: document.getElementById('pageInfo'),
         groupList: document.getElementById('groupList'),
         groupCount: document.getElementById('groupCount'),
         createGroupForm: document.getElementById('createGroupForm'),
+        createGroupDisclosure: document.getElementById('createGroupDisclosure'),
         newGroupName: document.getElementById('newGroupName'),
         createGroupBtn: document.getElementById('createGroupBtn'),
         deleteGroupBtn: document.getElementById('deleteGroupBtn'),
@@ -34,6 +56,10 @@
         clearFiltersBtn: document.getElementById('clearFiltersBtn'),
         loadingState: document.getElementById('loadingState'),
         emptyState: document.getElementById('emptyState'),
+        emptyTitle: document.getElementById('emptyTitle'),
+        emptyMessage: document.getElementById('emptyMessage'),
+        emptyUploadBtn: document.getElementById('emptyUploadBtn'),
+        emptyClearBtn: document.getElementById('emptyClearBtn'),
         errorState: document.getElementById('errorState'),
         librarySummary: document.getElementById('librarySummary'),
         maxSizeLabel: document.getElementById('maxSizeLabel'),
@@ -54,11 +80,17 @@
     let groups = [];
     let selectedGroup = 'all';
     let currentFilter = 'all';
+    let currentPage = 1;
+    let pageFiles = [];
+    const PAGE_SIZE = 24;
+    const selectedPaths = new Set();
+    let batchBusy = false;
     let currentPreview = null;
     let toastTimer = null;
     let uploadBusy = false;
     let shareBusy = false;
     let preparedShare = null;
+    let modalReturnFocus = null;
     const unshareableNames = new Set();
     const isAppleMobile = /iPhone|iPad|iPod/.test(navigator.userAgent) ||
         (navigator.platform === 'MacIntel' && navigator.maxTouchPoints > 1);
@@ -197,10 +229,22 @@
         toastTimer = setTimeout(() => { els.toast.hidden = true; }, duration);
     }
 
+    function rememberModalFocus(trigger = null) {
+        modalReturnFocus = trigger || document.activeElement;
+    }
+
+    function restoreModalFocus() {
+        if (modalReturnFocus?.isConnected) modalReturnFocus.focus();
+        modalReturnFocus = null;
+    }
+
     function setError(message) {
         els.loadingState.hidden = true;
         els.emptyState.hidden = true;
         els.gallery.hidden = true;
+        els.listTools.hidden = true;
+        els.selectionToolbar.hidden = true;
+        els.pagination.hidden = true;
         els.errorState.textContent = message;
         els.errorState.hidden = false;
     }
@@ -257,6 +301,10 @@
                 ...rootEntries.filter(item => item.id !== null).map(item => fileFromEntry(item, null)),
                 ...groupFiles.flat(),
             ].sort((a, b) => (Date.parse(b.created_at) || 0) - (Date.parse(a.created_at) || 0));
+            const existingPaths = new Set(allFiles.map(file => file.path));
+            for (const path of selectedPaths) {
+                if (!existingPaths.has(path)) selectedPaths.delete(path);
+            }
             if (selectedGroup !== 'all' && selectedGroup !== 'root' && !groups.some(group => group.id === selectedGroup)) {
                 selectedGroup = 'all';
             }
@@ -295,14 +343,20 @@
             button.className = 'group-item';
             button.classList.toggle('active', selectedGroup === group.id);
             button.setAttribute('aria-pressed', String(selectedGroup === group.id));
+            const icon = document.createElement('span');
+            icon.className = 'group-icon';
+            icon.setAttribute('aria-hidden', 'true');
+            icon.textContent = group.id === 'all' ? '▦' : group.id === 'root' ? '◫' : '▣';
             const name = document.createElement('span');
+            name.className = 'group-name';
             name.textContent = group.name;
             const count = document.createElement('span');
             count.className = 'group-item-count';
             count.textContent = countFor(group.id);
-            button.append(name, count);
+            button.append(icon, name, count);
             button.addEventListener('click', () => {
                 selectedGroup = group.id;
+                currentPage = 1;
                 els.uploadGroup.value = group.id === 'all' || group.id === 'root' ? '' : group.id;
                 renderGallery();
             });
@@ -332,8 +386,9 @@
         const advancedActive = [els.minSize, els.maxSize, els.dateFrom, els.dateTo].some(input => input.value !== '');
         els.advancedFilters.classList.toggle('has-active-filters', advancedActive);
         els.advancedFilters.querySelector('summary').textContent = advancedActive
-            ? 'Kích thước và ngày tải lên • Đang lọc'
-            : 'Kích thước và ngày tải lên';
+            ? 'Bộ lọc nâng cao • đang dùng'
+            : 'Bộ lọc nâng cao';
+        els.clearFiltersBtn.hidden = !(advancedActive || query || currentFilter !== 'all');
         const visible = scoped.filter(file => {
             if (currentFilter !== 'all' && file.kind !== currentFilter) return false;
             if (query && !normalizeSearch(file.originalName).includes(query)) return false;
@@ -344,39 +399,70 @@
             if (dateTo !== null && !(uploaded < dateTo)) return false;
             return true;
         });
+        const sort = els.sortSelect.value;
+        visible.sort((a, b) => {
+            if (sort === 'oldest') return (Date.parse(a.created_at) || 0) - (Date.parse(b.created_at) || 0);
+            if (sort === 'name') return a.originalName.localeCompare(b.originalName, 'vi', { sensitivity: 'base' });
+            if (sort === 'largest') return b.size - a.size;
+            return (Date.parse(b.created_at) || 0) - (Date.parse(a.created_at) || 0);
+        });
         const totalBytes = visible.reduce((sum, item) => sum + (item.size || 0), 0);
         els.libraryTitle.textContent = group?.name || (selectedGroup === 'root' ? 'Chưa phân nhóm' : 'File của bạn');
         els.librarySummary.textContent = `${visible.length}/${scoped.length} file • ${formatBytes(totalBytes)}`;
         renderGroups();
         els.gallery.replaceChildren();
         els.errorState.hidden = true;
+        const pageCount = Math.max(1, Math.ceil(visible.length / PAGE_SIZE));
+        currentPage = Math.min(Math.max(1, currentPage), pageCount);
+        const pageStart = (currentPage - 1) * PAGE_SIZE;
+        pageFiles = visible.slice(pageStart, pageStart + PAGE_SIZE);
+        els.listTools.hidden = visible.length === 0;
+        els.pageRange.textContent = visible.length
+            ? `${pageStart + 1}–${pageStart + pageFiles.length} / ${visible.length}` : '';
+        els.pagination.hidden = pageCount < 2;
+        els.pageInfo.textContent = `Trang ${currentPage} / ${pageCount}`;
+        els.previousPageBtn.disabled = currentPage === 1;
+        els.nextPageBtn.disabled = currentPage === pageCount;
+        renderSelectionToolbar();
 
         if (!scoped.length) {
             els.gallery.hidden = true;
-            els.emptyState.textContent = selectedGroup === 'all'
-                ? 'Chưa có file nào. Hãy upload file đầu tiên ở phía trên.'
-                : selectedGroup === 'root'
-                    ? 'Chưa có file chưa phân nhóm. Chọn “Chưa phân nhóm” ở phần Gửi file để tải lên.'
-                    : 'Nhóm này chưa có file. Chọn nhóm ở phần Gửi file để tải lên.';
+            els.emptyTitle.textContent = selectedGroup === 'all' ? 'Thư viện đang trống' : 'Nhóm này chưa có file';
+            els.emptyMessage.textContent = 'Tải ảnh, video hoặc audio lên để bắt đầu.';
+            els.emptyUploadBtn.hidden = false;
+            els.emptyClearBtn.hidden = true;
+            els.emptyState.hidden = false;
+            return;
+        }
+
+        if (!visible.length) {
+            els.gallery.hidden = true;
+            els.emptyTitle.textContent = 'Không tìm thấy file';
+            els.emptyMessage.textContent = 'Thử từ khóa khác hoặc xóa bộ lọc để xem lại tất cả file.';
+            els.emptyUploadBtn.hidden = true;
+            els.emptyClearBtn.hidden = false;
             els.emptyState.hidden = false;
             return;
         }
 
         els.emptyState.hidden = true;
         els.gallery.hidden = false;
-
-        if (!visible.length) {
-            const box = document.createElement('div');
-            box.className = 'state-box';
-            box.style.gridColumn = '1 / -1';
-            box.textContent = 'Không có file phù hợp. Hãy thử đổi từ khóa hoặc bộ lọc.';
-            els.gallery.appendChild(box);
-            return;
-        }
-
         const fragment = document.createDocumentFragment();
-        visible.forEach(item => fragment.appendChild(createMediaCard(item)));
+        pageFiles.forEach(item => fragment.appendChild(createMediaCard(item)));
         els.gallery.appendChild(fragment);
+    }
+
+    function renderSelectionToolbar() {
+        const count = selectedPaths.size;
+        els.selectionToolbar.hidden = count === 0;
+        const pagePaths = new Set(pageFiles.map(file => file.path));
+        const hiddenCount = [...selectedPaths].filter(path => !pagePaths.has(path)).length;
+        els.selectionCount.textContent = `${count} file đã chọn${hiddenCount ? ` (${hiddenCount} ở trang/nhóm khác)` : ''}`;
+        const allPageSelected = pageFiles.length > 0 && pageFiles.every(file => selectedPaths.has(file.path));
+        els.selectPageBtn.textContent = allPageSelected ? 'Bỏ chọn trang này' : 'Chọn trang này';
+        els.selectPageBtn.disabled = !pageFiles.length || batchBusy;
+        [els.downloadSelectedBtn, els.moveSelectedBtn, els.deleteSelectedBtn, els.clearSelectionBtn]
+            .forEach(button => { button.disabled = batchBusy || !count; });
     }
 
     async function createGroup(event) {
@@ -401,6 +487,7 @@
             });
             if (error) throw error;
             els.newGroupName.value = '';
+            els.createGroupDisclosure.open = false;
             selectedGroup = id;
             const loaded = await loadFiles();
             els.uploadGroup.value = id;
@@ -424,8 +511,8 @@
     }
 
     async function deleteGroup() {
-        if (uploadBusy) {
-            showToast('Hãy chờ tải file lên xong trước khi xóa nhóm.');
+        if (uploadBusy || batchBusy) {
+            showToast('Hãy chờ thao tác hiện tại hoàn tất trước khi xóa nhóm.');
             return;
         }
         const group = groups.find(item => item.id === selectedGroup);
@@ -463,11 +550,28 @@
     function createMediaCard(item) {
         const card = document.createElement('article');
         card.className = 'media-card';
+        card.classList.toggle('is-selected', selectedPaths.has(item.path));
+
+        const selectLabel = document.createElement('label');
+        selectLabel.className = 'card-select';
+        const select = document.createElement('input');
+        select.type = 'checkbox';
+        select.checked = selectedPaths.has(item.path);
+        select.disabled = batchBusy;
+        select.setAttribute('aria-label', `Chọn ${item.originalName}`);
+        select.addEventListener('change', () => {
+            if (select.checked) selectedPaths.add(item.path);
+            else selectedPaths.delete(item.path);
+            card.classList.toggle('is-selected', select.checked);
+            renderSelectionToolbar();
+        });
+        selectLabel.appendChild(select);
 
         const preview = document.createElement('button');
         preview.type = 'button';
         preview.className = 'media-preview';
-        preview.addEventListener('click', () => openPreview(item));
+        preview.setAttribute('aria-label', `Xem ${item.originalName}`);
+        preview.addEventListener('click', () => openPreview(item, preview));
 
         if (item.kind === 'image') {
             const img = document.createElement('img');
@@ -529,7 +633,7 @@
 
         actions.append(shareBtn, download, deleteBtn);
         info.append(name, meta, actions);
-        card.append(preview, info);
+        card.append(preview, info, selectLabel);
         return card;
     }
 
@@ -583,13 +687,14 @@
         unshareableNames.add(item.path);
         if (button) button.textContent = shareLabel(item);
         if (isPhotoMedia(item)) {
-            openPreview(item);
+            openPreview(item, button);
         } else {
             showToast(`Trình duyệt này không chia sẻ được file. Hãy dùng nút ${isAppleMobile ? 'Tải vào Files' : 'Tải gốc'} để lưu.`, 5500);
         }
     }
 
     async function deleteItem(item, button) {
+        if (batchBusy) return;
         if (!confirm(`Xóa “${item.originalName}”?\n\nThao tác này xóa file khỏi Supabase Storage.`)) return;
         button.disabled = true;
         button.textContent = 'Đang xóa…';
@@ -597,6 +702,7 @@
             const { error } = await bucket.remove([item.path]);
             if (error) throw error;
             allFiles = allFiles.filter(file => file.path !== item.path);
+            selectedPaths.delete(item.path);
             if (preparedShare?.path === item.path) preparedShare = null;
             unshareableNames.delete(item.path);
             if (currentPreview?.path === item.path) closePreview();
@@ -610,7 +716,179 @@
         }
     }
 
-    function openPreview(item) {
+    function selectedItems() {
+        return allFiles.filter(file => selectedPaths.has(file.path));
+    }
+
+    function setBatchBusy(busy, message = '') {
+        batchBusy = busy;
+        els.batchStatus.textContent = message;
+        els.gallery.querySelectorAll('.card-select input').forEach(input => { input.disabled = busy; });
+        renderSelectionToolbar();
+    }
+
+    function clearSelection() {
+        if (batchBusy) return;
+        selectedPaths.clear();
+        renderGallery();
+    }
+
+    function togglePageSelection() {
+        if (batchBusy || !pageFiles.length) return;
+        const allSelected = pageFiles.every(file => selectedPaths.has(file.path));
+        pageFiles.forEach(file => {
+            if (allSelected) selectedPaths.delete(file.path);
+            else selectedPaths.add(file.path);
+        });
+        renderGallery();
+    }
+
+    async function deleteSelected() {
+        if (batchBusy) return;
+        const items = selectedItems();
+        if (!items.length) return;
+        if (!confirm(`Xóa vĩnh viễn ${items.length} file đã chọn khỏi Supabase Storage?`)) return;
+        setBatchBusy(true, 'Đang xóa…');
+        let deleted = 0;
+        try {
+            const paths = items.map(item => item.path);
+            for (let i = 0; i < paths.length; i += 100) {
+                const { error } = await bucket.remove(paths.slice(i, i + 100));
+                if (error) throw error;
+                deleted += Math.min(100, paths.length - i);
+                els.batchStatus.textContent = `Đã xóa ${deleted}/${paths.length} file…`;
+            }
+            selectedPaths.clear();
+            preparedShare = null;
+            await loadFiles();
+            showToast(`Đã xóa ${deleted} file.`);
+        } catch (error) {
+            console.error(error);
+            await loadFiles();
+            showToast(`Đã xóa ${deleted}/${items.length} file. Lỗi: ${error.message || error}`, 6500);
+        } finally {
+            setBatchBusy(false);
+        }
+    }
+
+    function openMoveModal(event) {
+        if (batchBusy || !selectedPaths.size) return;
+        rememberModalFocus(event?.currentTarget);
+        els.moveTarget.replaceChildren(new Option('Chưa phân nhóm', ''));
+        groups.forEach(group => els.moveTarget.add(new Option(group.name, group.id)));
+        els.moveTarget.value = groups.find(group => group.id !== selectedGroup)?.id || '';
+        els.moveSummary.textContent = `${selectedPaths.size} file đã chọn`;
+        els.moveModal.hidden = false;
+        document.body.classList.add('modal-open');
+        els.moveTarget.focus();
+    }
+
+    function closeMoveModal() {
+        if (batchBusy) return;
+        els.moveModal.hidden = true;
+        document.body.classList.remove('modal-open');
+        restoreModalFocus();
+    }
+
+    async function moveSelected() {
+        if (batchBusy) return;
+        const items = selectedItems();
+        if (!items.length) return;
+        const targetGroup = groups.find(group => group.id === els.moveTarget.value);
+        const targetId = targetGroup?.id || '';
+        const toMove = items.filter(item => item.groupId !== targetId);
+        if (!toMove.length) {
+            showToast('Các file đã nằm trong nhóm này.');
+            closeMoveModal();
+            return;
+        }
+        els.moveModal.hidden = true;
+        document.body.classList.remove('modal-open');
+        restoreModalFocus();
+        setBatchBusy(true, 'Đang di chuyển…');
+        let moved = 0;
+        try {
+            for (const item of toMove) {
+                const targetPath = targetGroup ? `${targetGroup.path}/${item.name}` : item.name;
+                const { error } = await bucket.move(item.path, targetPath);
+                if (error) throw error;
+                moved++;
+                els.batchStatus.textContent = `Đã di chuyển ${moved}/${toMove.length} file…`;
+            }
+            selectedPaths.clear();
+            preparedShare = null;
+            selectedGroup = targetGroup?.id || 'root';
+            currentPage = 1;
+            await loadFiles();
+            showToast(`Đã di chuyển ${moved} file.`);
+        } catch (error) {
+            console.error(error);
+            await loadFiles();
+            showToast(`Đã di chuyển ${moved}/${toMove.length} file. Lỗi: ${error.message || error}`, 7000);
+        } finally {
+            setBatchBusy(false);
+        }
+    }
+
+    function safeArchiveName(value) {
+        return String(value || 'file').replace(/[\\/:*?"<>|\x00-\x1f]/g, '_').trim() || 'file';
+    }
+
+    async function downloadSelected() {
+        if (batchBusy) return;
+        const items = selectedItems();
+        if (!items.length) return;
+        if (!window.JSZip) {
+            showToast('Không tải được thư viện tạo ZIP. Hãy kiểm tra kết nối Internet rồi tải lại trang.', 6000);
+            return;
+        }
+        const totalBytes = items.reduce((sum, item) => sum + item.size, 0);
+        if (totalBytes > 200 * 1024 * 1024 && !confirm(`ZIP khoảng ${formatBytes(totalBytes)} có thể dùng nhiều bộ nhớ trên iPhone. Tiếp tục?`)) return;
+        setBatchBusy(true, 'Đang tải file để tạo ZIP…');
+        try {
+            const zip = new window.JSZip();
+            const usedNames = new Set();
+            for (let i = 0; i < items.length; i++) {
+                const item = items[i];
+                els.batchStatus.textContent = `Đang lấy file ${i + 1}/${items.length}…`;
+                const response = await fetch(item.publicUrl);
+                if (!response.ok) throw new Error(`${item.originalName}: HTTP ${response.status}`);
+                const groupName = groups.find(group => group.id === item.groupId)?.name || 'Chưa phân nhóm';
+                const folder = safeArchiveName(groupName);
+                const original = safeArchiveName(item.originalName);
+                let archivePath = `${folder}/${original}`;
+                let copy = 2;
+                while (usedNames.has(archivePath)) {
+                    const dot = original.lastIndexOf('.');
+                    const stem = dot > 0 ? original.slice(0, dot) : original;
+                    const ext = dot > 0 ? original.slice(dot) : '';
+                    archivePath = `${folder}/${stem} (${copy++})${ext}`;
+                }
+                usedNames.add(archivePath);
+                zip.file(archivePath, await response.blob(), { date: new Date(item.created_at || Date.now()) });
+            }
+            const archive = await zip.generateAsync({ type: 'blob', compression: 'STORE', streamFiles: true }, progress => {
+                els.batchStatus.textContent = `Đang đóng gói ${Math.round(progress.percent)}%…`;
+            });
+            const url = URL.createObjectURL(archive);
+            const link = document.createElement('a');
+            link.href = url;
+            link.download = `media-transfer-${new Date().toISOString().slice(0, 10)}.zip`;
+            document.body.appendChild(link);
+            link.click();
+            link.remove();
+            setTimeout(() => URL.revokeObjectURL(url), 60000);
+            showToast(`Đã tạo ZIP gồm ${items.length} file. Safari sẽ lưu ZIP vào Tệp.`);
+        } catch (error) {
+            console.error(error);
+            showToast(`Không tạo được ZIP: ${error.message || error}`, 6500);
+        } finally {
+            setBatchBusy(false);
+        }
+    }
+
+    function openPreview(item, trigger = null) {
+        if (els.modal.hidden) rememberModalFocus(trigger);
         currentPreview = item;
         const manualSave = isPhotoMedia(item) &&
             (!navigator.share || !navigator.canShare || unshareableNames.has(item.path));
@@ -656,6 +934,7 @@
         els.previewBody.appendChild(node);
         els.modal.hidden = false;
         document.body.classList.add('modal-open');
+        els.modal.querySelector('button[data-close-modal]').focus();
     }
 
     function closePreview() {
@@ -663,6 +942,7 @@
         document.body.classList.remove('modal-open');
         els.previewBody.replaceChildren();
         currentPreview = null;
+        restoreModalFocus();
     }
 
     function createQueueRow(file) {
@@ -755,8 +1035,31 @@
         if (completed) {
             showToast(`Đã upload ${completed}/${list.length} file.`);
             selectedGroup = targetGroup?.id || 'root';
+            currentPage = 1;
             await loadFiles();
         }
+    }
+
+    function openUploadModal(event) {
+        if (batchBusy) return;
+        rememberModalFocus(event?.currentTarget);
+        els.uploadGroup.value = groups.some(group => group.id === selectedGroup) ? selectedGroup : '';
+        els.uploadQueue.replaceChildren();
+        els.uploadQueue.hidden = true;
+        els.fileInput.value = '';
+        els.uploadModal.hidden = false;
+        document.body.classList.add('modal-open');
+        els.uploadGroup.focus();
+    }
+
+    function closeUploadModal() {
+        if (uploadBusy) {
+            showToast('Hãy chờ tải file lên hoàn tất.');
+            return;
+        }
+        els.uploadModal.hidden = true;
+        document.body.classList.remove('modal-open');
+        restoreModalFocus();
     }
 
     async function uploadStandard(file, storedName, mime, ui) {
@@ -816,16 +1119,36 @@
     }
 
     els.createGroupForm.addEventListener('submit', createGroup);
+    els.createGroupDisclosure.addEventListener('toggle', () => {
+        if (els.createGroupDisclosure.open) els.newGroupName.focus();
+    });
     els.deleteGroupBtn.addEventListener('click', deleteGroup);
     [els.searchInput, els.minSize, els.maxSize, els.dateFrom, els.dateTo]
-        .forEach(input => input.addEventListener('input', renderGallery));
-    els.clearFiltersBtn.addEventListener('click', () => {
+        .forEach(input => input.addEventListener('input', () => { currentPage = 1; renderGallery(); }));
+    function clearFilters() {
         [els.searchInput, els.minSize, els.maxSize, els.dateFrom, els.dateTo]
             .forEach(input => { input.value = ''; });
         currentFilter = 'all';
+        currentPage = 1;
         els.filterButtons.forEach(button => button.classList.toggle('active', button.dataset.filter === 'all'));
         renderGallery();
-    });
+    }
+    els.clearFiltersBtn.addEventListener('click', clearFilters);
+    els.emptyClearBtn.addEventListener('click', clearFilters);
+    els.sortSelect.addEventListener('change', () => { currentPage = 1; renderGallery(); });
+
+    els.openUploadBtn.addEventListener('click', openUploadModal);
+    els.emptyUploadBtn.addEventListener('click', openUploadModal);
+    document.querySelectorAll('[data-close-upload]').forEach(node => node.addEventListener('click', closeUploadModal));
+    els.selectPageBtn.addEventListener('click', togglePageSelection);
+    els.clearSelectionBtn.addEventListener('click', clearSelection);
+    els.deleteSelectedBtn.addEventListener('click', deleteSelected);
+    els.downloadSelectedBtn.addEventListener('click', downloadSelected);
+    els.moveSelectedBtn.addEventListener('click', openMoveModal);
+    els.confirmMoveBtn.addEventListener('click', moveSelected);
+    document.querySelectorAll('[data-close-move]').forEach(node => node.addEventListener('click', closeMoveModal));
+    els.previousPageBtn.addEventListener('click', () => { currentPage--; renderGallery(); });
+    els.nextPageBtn.addEventListener('click', () => { currentPage++; renderGallery(); });
 
     els.fileInput.addEventListener('change', event => uploadSelected(event.target.files));
     els.refreshBtn.addEventListener('click', loadFiles);
@@ -842,13 +1165,26 @@
 
     els.filterButtons.forEach(button => button.addEventListener('click', () => {
         currentFilter = button.dataset.filter;
+        currentPage = 1;
         els.filterButtons.forEach(btn => btn.classList.toggle('active', btn === button));
         renderGallery();
     }));
 
     document.querySelectorAll('[data-close-modal]').forEach(node => node.addEventListener('click', closePreview));
+    document.addEventListener('click', event => {
+        if (els.advancedFilters.open && !els.advancedFilters.contains(event.target)) {
+            els.advancedFilters.open = false;
+        }
+    });
     document.addEventListener('keydown', event => {
-        if (event.key === 'Escape' && !els.modal.hidden) closePreview();
+        if (event.key !== 'Escape') return;
+        if (!els.moveModal.hidden) closeMoveModal();
+        else if (!els.uploadModal.hidden) closeUploadModal();
+        else if (!els.modal.hidden) closePreview();
+        else if (els.advancedFilters.open) {
+            els.advancedFilters.open = false;
+            els.advancedFilters.querySelector('summary').focus();
+        }
     });
 
     els.shareFromModalBtn.addEventListener('click', () => {

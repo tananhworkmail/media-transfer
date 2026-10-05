@@ -9,13 +9,14 @@
 -- 5) Allowed MIME types: để trống, hoặc cho image/*, video/*, audio/*
 --
 -- CẢNH BÁO: Không có đăng nhập nên các policy dưới đây cố ý cho role anon
--- LIST / UPLOAD / DELETE trong bucket media.
+-- LIST / UPLOAD / UPDATE / DELETE trong bucket media.
 -- Ai có URL website/project + publishable key đều có thể sử dụng các quyền này.
 -- ============================================================
 
 -- Xóa policy cũ cùng tên để có thể chạy lại file này an toàn.
 drop policy if exists "media_anon_select" on storage.objects;
 drop policy if exists "media_anon_insert" on storage.objects;
+drop policy if exists "media_anon_update" on storage.objects;
 drop policy if exists "media_anon_delete" on storage.objects;
 
 -- Cho phép website liệt kê file trong bucket media.
@@ -30,6 +31,14 @@ create policy "media_anon_insert"
 on storage.objects
 for insert
 to anon
+with check (bucket_id = 'media');
+
+-- Cho phép di chuyển file giữa các nhóm trong cùng bucket.
+create policy "media_anon_update"
+on storage.objects
+for update
+to anon
+using (bucket_id = 'media')
 with check (bucket_id = 'media');
 
 -- Cho phép xóa file. Supabase remove() cũng cần SELECT, đã có ở trên.
